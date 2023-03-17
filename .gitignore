@@ -1,0 +1,10 @@
+/bin/
+/data/
+/include/
+/lib/
+/share/
+pyvenv.cfg
+
+/results/
+
+.DS_Store
