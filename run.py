@@ -8,11 +8,12 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from efficientnet_pytorch import EfficientNet
+from pytorch_pretrained_vit import ViT
 from opacus import PrivacyEngine
 from opacus.validators import ModuleValidator
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
-from models import ConvNet
+from models import convnet
 
 
 # constants
@@ -35,8 +36,8 @@ def load_data():
     train_ds = CIFAR10(root='data/', train=True, download=True, transform=transform)
     test_ds = CIFAR10(root='data/', train=False, download=True, transform=transform)
     
-    trainloader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
-    testloader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
+    trainloader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=32, pin_memory=True)
+    testloader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=32)
     
     return trainloader, testloader
 
@@ -108,20 +109,21 @@ def main():
     
     # array of all the models used for training
     models = []
-    models.append(ConvNet())
+    models.append(convnet(10))
     models.append(torchvision.models.resnet50(weights=torchvision.models.ResNet50_Weights.DEFAULT))
     models.append(EfficientNet.from_pretrained('efficientnet-b0', num_classes=10))
-    models.append(torchvision.models.vit_b_16())
+    models.append(ViT('B_16_imagenet1k', pretrained=True))
 
     for model in models:
         print("model: ", model.__class__.__name__)    
         # if model.__class__.__name__ == "ConvNet" or model.__class__.__name__ =="EfficientNet":
-        if model.__class__.__name__ == "ConvNet":
-            continue
+        # if model.__class__.__name__ == "ConvNet":
+        #     continue
         
         model.to(device)
-        model = ModuleValidator.fix(model)
-        ModuleValidator.validate(model, strict=False)
+        if not ModuleValidator.is_valid(model):
+            model = ModuleValidator.fix(model)
+            ModuleValidator.validate(model, strict=False)
         optimizer = optim.SGD(model.parameters(), lr=LR, momentum=M, weight_decay=WD)
         
         privacy_engine = PrivacyEngine()
