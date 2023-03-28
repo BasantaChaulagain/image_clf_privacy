@@ -1,102 +1,145 @@
 import numpy as np
-# import matplotlib.pyplot as plt
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 import torch.optim as optim
 import torchvision
 import torchvision.transforms as transforms
+import warnings
+warnings.filterwarnings('ignore')
 
+from efficientnet_pytorch import EfficientNet
 from opacus import PrivacyEngine
-from torch.utils.data import random_split
+from opacus.validators import ModuleValidator
+from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
-from torch.utils.data.dataloader import DataLoader
-from torchvision.utils import make_grid
-
-class Net(nn.Module):
-    def __init__(self):
-        super(Net, self).__init__()
-        self.conv1 = nn.Conv2d(3, 6, 5)     # input channel = 3(RGB), output channel = 6, kernel size = 5x5
-        self.pool = nn.MaxPool2d(2,2)       # filter size 2x2
-        self.conv2 = nn.Conv2d(6, 16, 5)    # output channel = 16
-        self.fc1 = nn.Linear(16*5*5, 120)   # in: 16xkernelxkernel, out features = 120    --> flattening
-        self.fc2 = nn.Linear(120, 84)       # in: 120, out features = 84
-        self.fc3 = nn.Linear(84, 10)        # in: 84, out features = 10 (10 classes in CIFAR10)
-        # values 120 and 84 are arbitrary values choses from experimentation on CIFAR10 datasets.
-        
-    def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))    # conv(x) --> relu --> maxpooling   (output channel = 6)
-        x = self.pool(F.relu(self.conv2(x)))    # conv(x) --> relu --> maxpooling   (output channel = 16)
-        x = x.view(-1, 16*5*5)                  # reshaping 3D tensor of size 16*5*5 to 1D tensor
-        x = F.relu(self.fc1(x))                 # relu activation applied to introduce non-linearity.
-        x = F.relu(self.fc2(x))
-        x = self.fc3(x)
-        return x
+from models import ConvNet
 
 
-def evaluate(model, testloader):
-    model.eval()
-    correct = 0
-    total = 0
-    with torch.no_grad():
-        for images, labels in testloader:
-            outputs = model(images)
-            _, predicted = torch.max(outputs.data, 1)
-            total += labels.size(0)
-            correct += (predicted == labels).sum().item()
-    
-    accuracy = 100 * correct/total
-    print("Accuracy on the test images: ", accuracy)
+# constants
+MAX_GRAD_NORM = 1.0     # The maximum L2 norm of per-sample gradients before they are aggregated by the averaging step
+NOISE_MULTIPLIER = 1.3  # The ratio of (sd of noise added to the gradients) to (the sensitivity of gradients)
+EPSILON = 20.0
+DELTA = 1e-5        
+EPOCHS = 10
+LR = 1e-3               # Learning rate of the algorithm
+BATCH_SIZE = 128
+M = 0.9                 # momentum
+WD = 0.1                # weight decay
 
+# These values, specific to the CIFAR10 dataset, are assumed to be known.
+CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
+CIFAR10_STD_DEV = (0.2023, 0.1994, 0.2010)
 
-def main():
-    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))])
-    
+def load_data():
+    transform = transforms.Compose([transforms.ToTensor(), transforms.Normalize(CIFAR10_MEAN, CIFAR10_STD_DEV)])
     train_ds = CIFAR10(root='data/', train=True, download=True, transform=transform)
     test_ds = CIFAR10(root='data/', train=False, download=True, transform=transform)
     
-    trainloader = DataLoader(train_ds, batch_size=8, shuffle=True)
-    testloader = DataLoader(test_ds, batch_size=8, shuffle=False)
+    trainloader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4, pin_memory=True)
+    testloader = DataLoader(test_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
     
-    net = Net()
+    return trainloader, testloader
+
+def accuracy(preds, labels):
+    return (preds == labels).mean()
+
+
+def train(model, trainloader, optimizer, epoch, privacy_engine, device):
+    model.train()
     criterion = nn.CrossEntropyLoss()
-    optimizer = optim.SGD(net.parameters(), lr=0.001, momentum=0.9)
-    # net.parameters() returns weights and biases of nn. (out channel, in channel, kernel, kernel) eg: (6, 3, 5, 5) for conv1(x)
+    losses, top1_acc = [], []
+    print(epoch)
     
-    epsilon = 1.0
-    delta = 1e-5
-
-    privacy_engine = PrivacyEngine()
-    net, optimizer, trainloader = privacy_engine.make_private_with_epsilon(
-        module = net,
-        optimizer = optimizer,
-        data_loader = trainloader,
-        noise_multiplier = 1.3,             # ratio of (sd of noise added to the gradients) to (the sensitivity of gradients)
-        max_grad_norm = 1.5,                # maximum L2 norm of gradients before clipping.
-    )
-    
-    epochs = 100
-    for epoch in range(epochs):
-        running_loss = 0.0
+    for (images, labels) in trainloader:
+        images = images.to(device)
+        labels = labels.to(device)
         
-        for i, (inputs, labels) in enumerate(trainloader):
-            optimizer.zero_grad()
-            
-            outputs = net(inputs)
-            loss = criterion(outputs, labels)
-            loss.backward()
-            
-            optimizer.step()
-            running_loss += loss.item()
-            
-            if i%2000 == 1999:
-                eps, delt = privacy_engine.get_privacy_spent(delta)
-                print('eps: %.3f delt: %.3f' % (eps, delt))
-                print('[%d, %5d] loss: %.3f' % (epoch+1, i+1, running_loss/2000))
-                running_loss = 0.0
-    
-    evaluate(net, testloader)
+        optimizer.zero_grad()
+        outputs = model(images)
+        loss = criterion(outputs, labels)
+        preds = np.argmax(outputs.detach().cpu().numpy(), axis=1)
+        labels = labels.detach().cpu().numpy()
+        acc1 = accuracy(preds, labels)
+        
+        losses.append(loss.item())
+        top1_acc.append(acc1)
+        loss.backward()
+        optimizer.step()
+        
+    epsilon = privacy_engine.get_epsilon(DELTA)
+    print(
+        f"\tTrain Epoch: {epoch} \t"
+        f"Loss: {np.mean(losses):.6f} "
+        f"Acc@1: {np.mean(top1_acc) * 100:.6f} "
+        f"(ε = {epsilon:.2f}, δ = {DELTA})"
+    )
 
+
+def test(model, testloader, device):
+    model.eval()
+    criterion = nn.CrossEntropyLoss()
+    losses, top1_acc = [], []
+    
+    with torch.no_grad():
+        for images, labels in testloader:
+            images = images.to(device)
+            labels = labels.to(device)
+            
+            outputs = model(images)
+            loss = criterion(outputs, labels)
+            preds = np.argmax(outputs.numpy(), axis=1)
+            labels = labels.numpy()
+            acc = accuracy(preds, labels)
+            losses.append(loss)
+            top1_acc.append(acc)
+    
+    top1_avg = np.mean(top1_acc)
+    print(
+        f"\tTest set:"
+        f"Loss: {np.mean(losses):.6f} "
+        f"Acc: {top1_avg * 100:.6f} "
+    )
+    return np.mean(top1_acc)
+
+
+def main():
+    trainloader, testloader = load_data()
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    
+    # array of all the models used for training
+    models = []
+    models.append(ConvNet())
+    models.append(torchvision.models.resnet50(weights=torchvision.models.ResNet50_Weights.DEFAULT))
+    models.append(EfficientNet.from_pretrained('efficientnet-b0', num_classes=10))
+    models.append(torchvision.models.vit_b_16())
+
+    for model in models:
+        print("model: ", model.__class__.__name__)    
+        # if model.__class__.__name__ == "ConvNet" or model.__class__.__name__ =="EfficientNet":
+        if model.__class__.__name__ == "ConvNet":
+            continue
+        
+        model.to(device)
+        model = ModuleValidator.fix(model)
+        ModuleValidator.validate(model, strict=False)
+        optimizer = optim.SGD(model.parameters(), lr=LR, momentum=M, weight_decay=WD)
+        
+        privacy_engine = PrivacyEngine()
+        model, optimizer, trainloader = privacy_engine.make_private_with_epsilon(
+            module=model,
+            optimizer=optimizer,
+            data_loader=trainloader,
+            epochs=EPOCHS,
+            target_epsilon=EPSILON,
+            target_delta=DELTA,
+            max_grad_norm=MAX_GRAD_NORM,
+        )
+        print(f"Using sigma={optimizer.noise_multiplier} and C={MAX_GRAD_NORM}")
+        
+        for epoch in range(EPOCHS):
+            train(model, trainloader, optimizer, epoch, privacy_engine, device)
+        
+        test(model, testloader, device)
 
 if __name__ == "__main__":
     main()
