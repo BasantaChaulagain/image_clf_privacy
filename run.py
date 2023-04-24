@@ -18,10 +18,10 @@ from models import convnet
 
 # constants
 MAX_GRAD_NORM = 1.0     # The maximum L2 norm of per-sample gradients before they are aggregated by the averaging step
-NOISE_MULTIPLIER = 1.3  # The ratio of (sd of noise added to the gradients) to (the sensitivity of gradients)
-EPSILON = 20.0
+# NOISE_MULTIPLIER = 1.3  # The ratio of (sd of noise added to the gradients) to (the sensitivity of gradients)
+EPSILON = 5.0
 DELTA = 1e-5        
-EPOCHS = 10
+EPOCHS = 100
 LR = 1e-3               # Learning rate of the algorithm
 BATCH_SIZE = 128
 M = 0.9                 # momentum
@@ -115,16 +115,14 @@ def main():
     models.append(ViT('B_16_imagenet1k', pretrained=True))
 
     for model in models:
-        print("model: ", model.__class__.__name__)    
-        # if model.__class__.__name__ == "ConvNet" or model.__class__.__name__ =="EfficientNet":
-        # if model.__class__.__name__ == "ConvNet":
-        #     continue
+        print("model: ", model.__class__.__name__)
         
         model.to(device)
         if not ModuleValidator.is_valid(model):
             model = ModuleValidator.fix(model)
             ModuleValidator.validate(model, strict=False)
-        optimizer = optim.SGD(model.parameters(), lr=LR, momentum=M, weight_decay=WD)
+        # optimizer = optim.SGD(model.parameters(), lr=LR, momentum=M, weight_decay=WD)
+        optimizer = optim.Adam(model.parameters(), lr=LR)
         
         privacy_engine = PrivacyEngine()
         model, optimizer, trainloader = privacy_engine.make_private_with_epsilon(
