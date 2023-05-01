@@ -8,24 +8,28 @@ import warnings
 warnings.filterwarnings('ignore')
 
 from efficientnet_pytorch import EfficientNet
-from pytorch_pretrained_vit import ViT
+from vit_pytorch import ViT
 from opacus import PrivacyEngine
 from opacus.validators import ModuleValidator
 from torch.utils.data import DataLoader
 from torchvision.datasets import CIFAR10
 from models import convnet
+import timm
 
 
 # constants
-MAX_GRAD_NORM = 1.0     # The maximum L2 norm of per-sample gradients before they are aggregated by the averaging step
-# NOISE_MULTIPLIER = 1.3  # The ratio of (sd of noise added to the gradients) to (the sensitivity of gradients)
+MAX_GRAD_NORM = 1.0    # The maximum L2 norm of per-sample gradients before they are aggregated by the averaging step
+# NOISE_MULTIPLIR = 1.3  # The ratio of (sd of noise added to the gradients) to (the sensitivity of gradients)
 EPSILON = 5.0
 DELTA = 1e-5        
-EPOCHS = 100
+EPOCHS = 200
 LR = 1e-3               # Learning rate of the algorithm
 BATCH_SIZE = 128
-M = 0.9                 # momentum
-WD = 0.1                # weight decay
+
+# max_grad_norm, epsilon, lr
+# constants = [[2.5, 3.0, 5e-4], [5.0, 3.0, 5e-4]]
+# M = 0.9                 # momentum
+# WD = 0.1                # weight decay
 
 # These values, specific to the CIFAR10 dataset, are assumed to be known.
 CIFAR10_MEAN = (0.4914, 0.4822, 0.4465)
@@ -49,7 +53,6 @@ def train(model, trainloader, optimizer, epoch, privacy_engine, device):
     model.train()
     criterion = nn.CrossEntropyLoss()
     losses, top1_acc = [], []
-    print(epoch)
     
     for (images, labels) in trainloader:
         images = images.to(device)
@@ -88,10 +91,10 @@ def test(model, testloader, device):
             
             outputs = model(images)
             loss = criterion(outputs, labels)
-            preds = np.argmax(outputs.numpy(), axis=1)
-            labels = labels.numpy()
+            preds = np.argmax(outputs.detach().cpu().numpy(), axis=1)
+            labels = labels.detach().cpu().numpy()
             acc = accuracy(preds, labels)
-            losses.append(loss)
+            losses.append(loss.detach().cpu().numpy())
             top1_acc.append(acc)
     
     top1_avg = np.mean(top1_acc)
@@ -104,17 +107,34 @@ def test(model, testloader, device):
 
 
 def main():
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    
     trainloader, testloader = load_data()
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # array of all the models used for training
-    models = []
-    models.append(convnet(10))
-    models.append(torchvision.models.resnet50(weights=torchvision.models.ResNet50_Weights.DEFAULT))
-    models.append(EfficientNet.from_pretrained('efficientnet-b0', num_classes=10))
-    models.append(ViT('B_16_imagenet1k', pretrained=True))
-
-    for model in models:
+    for i in range(1):
+        print("run:", i)
+        
+        # array of all the models used for training
+        # models = []
+        # models.append(convnet(10))
+        # models.append(torch.hub.load('pytorch/vision:v0.10.0', 'vgg11', pretrained=True))
+        # models.append(torchvision.models.densenet161(pretrained=True))
+        # models.append(torchvision.models.resnet50(weights=torchvision.models.ResNet50_Weights.DEFAULT))
+        # models.append(EfficientNet.from_pretrained('efficientnet-b0', num_classes=10))
+        # models.append(ViT(image_size=32, patch_size=4, num_classes=10, dim=64, depth=6, heads=8, mlp_dim=128))
+    
+        # for const in constants:
+        # for model in models:
+            # MAX_GRAD_NORM = const[0]
+            # EPSILON = const[1]
+            # LR = const[2]
+        model = torchvision.models.densenet161(pretrained=True)
+        # if model.__class__.__name__ == "Sequential":
+        #     EPOCHS = 10
+            
         print("model: ", model.__class__.__name__)
         
         model.to(device)
@@ -140,6 +160,8 @@ def main():
             train(model, trainloader, optimizer, epoch, privacy_engine, device)
         
         test(model, testloader, device)
+            
+        print("\n==========\n")
 
 if __name__ == "__main__":
     main()
